@@ -1,5 +1,5 @@
 # Kidney-outcomes-R01---Kamoun-PI
-Instructions and code for extracting and formatting data to send to Penn.
+Instructions and code for extracting and formatting data to send to Penn. The R scripts are designed to be run in RStudio.
 
 This repository contains several files and folders:
 
