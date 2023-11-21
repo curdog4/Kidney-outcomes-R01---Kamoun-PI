@@ -1,0 +1,11 @@
+study_ID,days_post_Tx,SpecificityTxt,ModerateRiskAntibodyTxt,LowRiskAntibodyTxt,BeadID,RawData,NormalValue,Description,SpecAbbr,Specificity
+2378745,616,B:37 47,NA,NA,001,129.27000427246094,NA,"LABScreen™ Single Antigen HLA Class I - Combi,  Lot 013","-,-,-,-,-,-,-,-","-,-,-,-,-,-"
+7615837,616,B:37 47,NA,NA,002,17603.119140625,NA,"LABScreen™ Single Antigen HLA Class I - Combi,  Lot 013","-,-,-,-,-,-,-,-","-,-,-,-,-,-"
+6375716,616,B:37 47,NA,NA,003,225.91000366210938,41.52000045776367,"LABScreen™ Single Antigen HLA Class I - Combi,  Lot 013","A1,-,-,-,-,-,-,-","A*01:01,-,-,-,-,-"
+5312395,616,B:37 47,NA,NA,004,96.0199966430664,0,"LABScreen™ Single Antigen HLA Class I - Combi,  Lot 013","A2,-,-,-,-,-,-,-","A*02:01,-,-,-,-,-"
+4176522,616,B:37 47,NA,NA,005,89.589996337890625,0,"LABScreen™ Single Antigen HLA Class I - Combi,  Lot 013","A2,-,-,-,-,-,-,-","A*02:03,-,-,-,-,-"
+3485787,616,B:37 47,NA,NA,006,127.16000366210938,0,"LABScreen™ Single Antigen HLA Class I - Combi,  Lot 013","A2,-,-,-,-,-,-,-","A*02:06,-,-,-,-,-"
+7638161,616,B:37 47,NA,NA,007,140.27000427246094,0,"LABScreen™ Single Antigen HLA Class I - Combi,  Lot 013","A3,-,-,-,-,-,-,-","A*03:01,-,-,-,-,-"
+945583,616,B:37 47,NA,NA,008,105.7699966430664,0,"LABScreen™ Single Antigen HLA Class I - Combi,  Lot 013","A11,-,-,-,-,-,-,-","A*11:01,-,-,-,-,-"
+5848243,616,B:37 47,NA,NA,009,112.83000183105469,0,"LABScreen™ Single Antigen HLA Class I - Combi,  Lot 013","A11,-,-,-,-,-,-,-","A*11:02,-,-,-,-,-"
+4260786,616,B:37 47,NA,NA,010,95.95999908447266,0,"LABScreen™ Single Antigen HLA Class I - Combi,  Lot 013","A23,-,-,-,-,-,-,-","A*23:01,-,-,-,-,-"
