@@ -1,0 +1,597 @@
+---
+title: "Penn HLA lab data extraction - 2017-2023"
+output: html_notebook
+params:
+  Center_ID: 99
+---
+
+```{r}
+# Extract data from HistoTrac Patient table.
+library(DBI)
+library(odbc)
+library(tidyverse)
+library(openxlsx)
+library(readxl)
+library(xml2)
+
+#Creating a connection to the HistoTrac server
+con <- dbConnect(odbc::odbc(), "HistoTrac", timeout = 10)
+
+#Connecting to the Patient table in HisoTrac and pulling out the necessary columns.
+(Patients_and_donors <- tbl(con, "Patient") 
+  %>% select(PatientId, HospitalID, UNOSId, SSNbr, firstnm, lastnm, minm, DOB, PatientTypeCd, categoryCd, StatusCd, A1Cd:dq2cd, mA1Cd:mDPB12cd, mBw1Cd:mBw2Cd, mA1NMDPCd:mDPB12NMDPcd, mA1EqCd:mDPB12EqCd)
+  %>% as_tibble # Download to R.
+  )
+
+# Sometimes patient and/or donor IDs will be mistakenly input into the wrong entries (e.g. sometimes a patient record will contain the donor ID, instead of the donor record contain the donor ID). To ensure accurate matching, create separate recipient and donor tables, based on the value found in HistoTrac.
+
+(Patients <- Patients_and_donors %>% filter(PatientTypeCd == "Patient"))
+(Donors <- Patients_and_donors %>% filter(PatientTypeCd == "Donor"))
+```
+
+```{r}
+# Import transplanted kidney patients from TIEDI record.
+
+(TIEDI_record_2017_2023 <- read_rds("PENN_TEIDI_combined_2017_2023.rds"))
+
+# Filter for TIEDI records that won't match to HistoTrac records. 
+
+TIEDI_record_2017_2023 %>% anti_join(Patients, by = c("SSN.recipient" = "SSNbr"))
+
+# All recipients match.
+
+# Now match recipients from the TIEDI record with the HistoTrac database. The relationship below is set to "many-to-one" because some recipients will have had multiple transplants. If this gives an error there is a problem.
+
+(TIEDI_record_2017_2023_patients <- TIEDI_record_2017_2023 %>% left_join(Patients, by = c("SSN.recipient" = "SSNbr"), relationship = "many-to-one"))
+
+# How many recipients don't have typing?
+
+TIEDI_record_2017_2023_patients %>% count(A1Cd)
+
+# All recipients have typing, great!
+
+# Create a study ID for each transplant, which will be a combination of the center ID for this study along with the histocompatibility ID from SRTR.
+
+(TIEDI_record_2017_2023_patients_IDs <- TIEDI_record_2017_2023_patients %>% mutate(study_ID = str_c(params$Center_ID, "-", histocompatibility_ID), .before = histocompatibility_ID))
+```
+
+```{r}
+# Now filter for donors that won't match joining by UNOS ID.
+
+TIEDI_record_2017_2023_patients_IDs %>% anti_join(Donors, by = c("donor_ID" = "UNOSId"))
+
+# All donors match
+
+# Once UNOS IDs for all donors are updated, look to see if any of the recipients will be matched to more than one entry. This should result in a table with zero entries if everything is OK.
+
+TIEDI_record_2017_2023_patients_IDs %>% left_join(Donors, by = c("donor_ID" = "UNOSId"), suffix = c(".recipient", ".donor")) %>% filter(n() > 1, .by = "histocompatibility_ID")
+
+# No duplicate donors.
+
+# Now perform a final join, using "many-to-one" joining.
+
+(TIEDI_record_2017_2023_patients_donors <- TIEDI_record_2017_2023_patients_IDs %>% left_join(Donors, by = c("donor_ID" = "UNOSId"), suffix = c(".recipient", ".donor"), relationship = "many-to-one"))
+
+# Determine how many donor entries are missing after the join.
+
+TIEDI_record_2017_2023_patients_donors %>% filter(is.na(PatientId.donor))
+
+# This number should be zero. If not, go back and update UNOS IDs for the donors.
+
+# How many donors don't have typing?
+TIEDI_record_2017_2023_patients_donors %>% count(A1Cd.donor)
+
+# 1 donor has "" for A.1 typing. Determine what is going on with this donor.
+
+TIEDI_record_2017_2023_patients_donors %>% filter(A1Cd.donor == "") %>% select(histocompatibility_ID:HospitalID.recipient, PatientId.donor:PatientTypeCd.donor)
+
+# This is a complicated case where the organ was transplanted into another recipient who died very quickly, and so the organ was removed and put in a second recpient, and the organ was given a new donor ID. We don't have good typing on the donor, so I think it will be best to remove this transplant.
+
+(TIEDI_record_2017_2023_patients_donors <- TIEDI_record_2017_2023_patients_donors %>% filter(histocompatibility_ID != 1821753))
+
+# How many donors don't have typing?
+TIEDI_record_2017_2023_patients_donors %>% count(A1Cd.donor)
+
+# All donors now have typing.
+
+# While pulling data from HistoTrac, the PatientId will be used to link data. Once the tables are stripped of PHI and sent to Penn, there will need to be a way to link tables. I will create a study ID for each patient and donor and use that for linking at Penn.
+
+(Study_IDs <- TIEDI_record_2017_2023_patients_donors %>% select(histocompatibility_ID, PatientId.recipient, donor_ID, PatientId.donor) %>% mutate(study_ID = str_c(params$Center_ID, "-", histocompatibility_ID)))
+```
+
+
+
+# The following is unused notes and code from the current version:
+
+# There are 55 (4.4%) donors that won't match. Looking through, it would appear most if not all are living donors. For these donors, we submit info to UNOS, which assigns a UNOS ID for the donor. We often record this in the sensitizing events table, but not in the Patient table. Possible solutions to this: 1. match to Patient table based on first and last name. This is problematic. 2. Update HistoTrac with the donor IDs. This is doable for 58 patients, but what about for other centers?
+
+# Save a table of the unmatched donors so we can update HistoTrac.
+TIEDI_record_2017_10_2023_patients_IDs %>% anti_join(Donors, by = c("donor_ID" = "UNOSId")) %>% select(histocompatibility_ID:first_donor) %>% write.xlsx("Donors without UNOS ID.xlsx")
+
+# After updating HistoTrac, all donors now match.
+
+
+# There were two duplicate donor entries in HistoTrac. After they were resolved in HistoTrac, 
+
+# It looks like this donor had typing entered in the sensitizing events table, but not the patient table. Input typing for these donors in the Patient table.
+
+# Save a table of these donors.
+
+TIEDI_record_2017_10_2023_patients_donors %>% filter(A1Cd.donor == "") %>% select(histocompatibility_ID:HospitalID.recipient, PatientId.donor:PatientTypeCd.donor) %>% write.xlsx("Donors without typing.xlsx")
+
+# Donors updated (it turned out there were duplicate entries for some of these donors)
+
+
+```{r}
+# Clean the main recipient and donor typing table of PHI and save for transfer to Penn
+
+(Penn_main_table_2017_2023 <- TIEDI_record_2017_2023_patients_donors %>% select(study_ID, histocompatibility_ID, donor_ID, A1Cd.recipient:mDPB12EqCd.recipient, A1Cd.donor:mDPB12EqCd.donor))
+
+Penn_main_table_2017_2023 %>% saveRDS("Files/Penn_main_table_2017_2023.rds")
+Penn_main_table_2017_2023 %>% write_csv("Files/Penn_main_table_2017_2023.csv.gz")
+```
+
+```{r}
+# Create a vector of PatientIDs (HistoTrac IDs) for all of the patients and donors included in cohort, for linking to typing and antibody data.
+
+PatientId_recipient <- TIEDI_record_2017_2023_patients_donors %>% pull(PatientId.recipient)
+
+PatientId_donor <- TIEDI_record_2017_2023_patients_donors %>% pull(PatientId.donor)
+
+# combine the IDs
+PatientId_total <- c(PatientId_recipient, PatientId_donor)
+
+# Create a table for linking HistoTrac IDs to study IDs. We'll need separate tables for recipient and donors, since each will have typing results, etc.
+
+(Study_IDs_HitoTrac_IDs_patients <- Study_IDs %>% select(study_ID, PatientId.recipient))
+(Study_IDs_HitoTrac_IDs_donors <- Study_IDs %>% select(donor_ID, PatientId.donor))
+
+# For the SAB  and XM data, I will want to calculate sample date as time post transplant, so we don't send actual sample dates to Penn. This will create a table to join to the SAB results to calculate time post transplant.
+
+(Study_IDs_Tx_dates <- TIEDI_record_2017_2023_patients_donors %>% select(histocompatibility_ID, PatientId.recipient, Tx_date) %>% mutate(study_ID = str_c(params$Center_ID, "-", histocompatibility_ID)))
+```
+
+```{r}
+# Connect to HistoTrac tables
+
+#Connecting to the Sample table in HisoTrac and filtering for samples from the cohort.
+(cohort_samples <- tbl(con, "Sample") 
+  %>% select(PatientId, SampleID, SampleNbr, SampleDt, SpecimenTypeCd, StatusCd)
+  %>% filter(PatientId %in% PatientId_total)
+  )
+
+# Connecting to the Test table in HisoTrac.
+# Note: the connection to the SQL server is flaky, and not every combination of columns in the select line will work. May have to do different combinations for different tests.
+
+(Test_typing <- tbl(con, "Test") 
+  %>% select(TestId, SampleId, TestDt, TestTypeCd, TestMethodCd, ReportableCommentsTxt)
+  )
+
+(Test_SAB <- tbl(con, "Test") 
+  %>% select(TestId, SampleId, TestDt, TestTypeCd, TestMethodCd, DilutionTxt, PRAResultCd, SpecificityTxt, ModerateRiskAntibodyTxt, LowRiskAntibodyTxt)
+  )
+
+# Connecting to the UserTest table (I'm not sure if this is a table is specific to Penn's HistoTrac setup), which contains information on DSA calls in post-transplant SAB tests.
+
+(UserTest <- tbl(con, "UserTest") 
+  %>% select(TestId, ClassIDSA:DSABwMFI)
+  )
+
+#Connecting to the TestDetail table in HisoTrac. This contains the SAB bead-level data.
+(TestDetail <- tbl(con, "TestDetail") 
+  %>% select(TestId, TestDetailTypeCd, SingleAgBead, SingleAgRaw, SingleAgNormalized, SingleAgSpecAbbr, SingleAgSpecificity)
+)
+
+#Connecting to the Xmatch table in HisoTrac.
+(Xmatch <- tbl(con, "Xmatch") 
+  #%>% select(PatientId, DonorId, TestId)
+)
+
+```
+
+```{r}
+# Get samples for RT-PCR
+(cohort_tests_RT_PCR <- cohort_samples
+  %>% left_join(Test_typing, by = c("SampleID" = "SampleId"))
+  #%>% count(TestTypeCd) # 155 different codes.
+  #%>% count(TestMethodCd) # 31 codes, "RT-PCR" is the only one for RT-PCR.
+  %>% filter(TestMethodCd == "RT-PCR")   
+  %>% as_tibble # Download into R.
+  #%>% filter(n() > 1, .by = SampleNbr) # Several samples appear twice. Keep only one per patient.
+  %>% slice_head(by = SampleNbr) # Keeps only the first of duplicate samples.
+  )
+
+# Identify the folder where the RT-PCR XML files are stored. (Note that folder slashes have to go this way (/) which is opposite to the way Windows does it. If you are having problems, make sure your slashes are going the right way (/).)
+RT_PCR_XML_folder <- "I:/PathologyDept-HUP/HLALAB/RT-PCR/Analysis/XML"
+
+# Find all XML files. Essentially, R is combing through the folder and sub-folders where your RT-PCR XML files are, searching for any file that ends in ".xml," and adding the file name and details to a table. 
+(RT_PCR_XML_files <- file.info(list.files(RT_PCR_XML_folder, pattern = ".xml", full.names = TRUE)) 
+  %>% as_tibble(rownames = "full_path")
+  %>% mutate(path = RT_PCR_XML_folder)
+  %>% mutate(file = str_extract(full_path, "[^/]+$"))
+  %>% mutate(Sample_number = str_extract(file, "[:digit:]+-[:digit:]+"))
+  %>% filter(!is.na(Sample_number))
+  # Remove duplicate files by filtering for the newest file, reasoning that a repeat sample will most likely be the best to use.
+  %>% arrange(desc(ctime))
+  %>% slice_head(by = Sample_number)
+  )
+
+# A function to extract the ambiguities from the RT_PCR file and save them as a single string
+RT_PCR_amgiguities <- function(XML, directory) {
+  cwd <- setwd(directory)
+  on.exit(setwd(cwd))
+  xml_find_all(read_xml(XML), ".//alleles") %>% 
+    xml_text() %>% 
+    str_c(collapse = "+")
+}
+
+# Add the ambiguities to the RT_PCR table.
+
+(cohort_tests_RT_PCR_complete <- cohort_tests_RT_PCR
+  %>% left_join(RT_PCR_XML_files, by = join_by(SampleNbr == Sample_number), relationship = "one-to-one")
+  #%>% filter(is.na(file)) # 6 samples that had RT-PCR ordered do not have XML files available.
+  %>% filter(!is.na(file))
+  # Extract the ambiguity strings
+  %>% mutate(ambiguities = map2_chr(file, path, RT_PCR_amgiguities, .progress = TRUE))
+  %>% mutate(sample_type = "RT-PCR")
+  %>% select(sample_type, SampleNbr, PatientId, ambiguities)
+  )
+
+# Add the study IDs to the RT-PCR table and remove PHI to send to Penn.
+(Penn_RT_PCR_table_2017_2023 <- cohort_tests_RT_PCR_complete 
+  %>% left_join(Study_IDs_HitoTrac_IDs_patients, by = join_by(PatientId == PatientId.recipient), relationship = "many-to-one") 
+  %>% left_join(Study_IDs_HitoTrac_IDs_donors, by = join_by(PatientId == PatientId.donor)) 
+  %>% arrange(desc(SampleNbr)) # Many donors were typed on multiple samples, but we only need one. Take the second sample, assuming it is most likely to be the best to use.
+  %>% slice_head(by = PatientId)
+  %>% select(study_ID, donor_ID, sample_type, ambiguities)
+ )
+
+# Save the files
+Penn_RT_PCR_table_2017_2023 %>% saveRDS("Files/Penn_RT_PCR_table_2017_2023.rds")
+Penn_RT_PCR_table_2017_2023 %>% write_csv("Files/Penn_RT_PCR_table_2017_2023.csv.gz")
+```
+
+```{r}
+# Get high-res typing from NGS results entered as low-res.
+
+# Find the samples for the cohort patients/donors
+(cohort_tests <- cohort_samples
+  %>% as_tibble # Download into R.
+  #%>% filter(n() > 1, .by = SampleNbr) # Several samples appear twice. Keep only one per patient.
+  %>% slice_head(by = SampleNbr) # Keeps only the first of duplicate samples.
+  )
+
+# Load the NGS entered as low res results
+(NGS_entered_as_low_res <- read_rds("NGS_entered_as_low_res_final.rds"))
+
+# Join the tables together. The inner_join will only keep those samples that have reanalzyed NGS results
+(Penn_NGS_table_2017_2023 <- cohort_tests
+  %>% inner_join(NGS_entered_as_low_res, by = join_by(SampleNbr == sample))
+  #%>% count(SpecimenTypeCd) # Most are blood, a few are serum, but we sometimes use a serum clot for typing.
+  %>% left_join(Study_IDs_HitoTrac_IDs_patients, by = join_by(PatientId == PatientId.recipient), relationship = "many-to-one")
+  %>% left_join(Study_IDs_HitoTrac_IDs_donors, by = join_by(PatientId == PatientId.donor))
+  #%>% count(HLA_genotype) # No empty rows.
+  %>% select(study_ID, donor_ID, HLA_genotype)
+  %>% mutate(sample_type = "NGS", .after = donor_ID)
+  )
+
+# Save the files
+Penn_NGS_table_2017_2023 %>% saveRDS("Files/Penn_NGS_table_2017_2023.rds")
+Penn_NGS_table_2017_2023 %>% write_csv("Files/Penn_NGS_table_2017_2023.csv.gz")
+```
+
+```{r}
+# Get samples for SSO
+(cohort_tests_SSO <- cohort_samples
+  %>% left_join(Test_typing, by = c("SampleID" = "SampleId"))
+  #%>% count(TestTypeCd) # 155 different codes.
+  #%>% count(TestMethodCd) # 31 codes, multiple ways to indicate SSO testing: "DNA-SSOP", "PCR SSOP".
+  %>% filter(TestMethodCd == "PCR SSOP" | TestMethodCd == "DNA-SSOP")   # "ReportableCommentsTxt" contains the ambiguity string, but not for all entries. Might be best to get it straight out of Fusion. However, to make sure in case there is not data in Fusion, I'll format this data for saving.
+  %>% as_tibble # Download into R.
+  #%>% slice_max(SampleDt, by = PatientId, with_ties = TRUE) # We sometimes typed DPB1 years later. This was only capturing the sample for DPB1, but not the other loci.
+  # Collapse all the sample comments, containing NMDP codes and allele strings, to a single row.
+  %>% summarise(ReportableCommentsTxt = str_c(ReportableCommentsTxt, collapse = "+"), .by = c(PatientId, SampleID, SampleNbr))
+  # This resulted many entries with just pluses. Remove these to clean up the column.
+  %>% mutate(ReportableCommentsTxt = str_replace(ReportableCommentsTxt, "^\\+*", ""))
+  )
+
+# Create vector of SSO sample numbers
+SSO_samples <- cohort_tests_SSO %>% pull(SampleNbr)
+```
+
+```{r}
+#This code connects to the Fusion database. The computer RStudio is running on needs to have a Fusion connection named "Fusion." See PowerPoint file for instructions on how to create a connection on a Windows computer.
+
+#Connecting to the Fusion database. You will be asked for the username and password for the Fusion database when you first connect.
+Fusion <- dbConnect(
+  odbc::odbc(), 
+  "Fusion",
+  UID = rstudioapi::askForPassword("Database user"),
+  PWD = rstudioapi::askForPassword("Database password")
+  )
+
+```
+
+```{r}
+# Connect to Fusion and compile SSO results.
+
+# Connect to the necessary tables
+(Fusion_SAMPLE <- tbl(Fusion, "SAMPLE"))
+(Fusion_Well <- tbl(Fusion, "Well"))
+(Fusion_Tray <- tbl(Fusion, "Tray"))
+(Fusion_Product <- tbl(Fusion, "Product"))
+(Fusion_WELL_RESULTT <- tbl(Fusion, "WELL_RESULT"))
+
+# Download all the samples in the Fusion database to filter for samples for this study.
+(SSO_fusion_sample_IDs <- Fusion_SAMPLE
+  %>% as_tibble()
+)
+
+# Extract the sample IDs from Fusion, and filter for the samples for this study.
+(SSO_SampleIDs <- SSO_fusion_sample_IDs %>% 
+  select(SampleID, SampleIDName) %>% 
+  # This code extracts the sample ID for matching to the HistoTrac sample ID. This will likely need to be changed for each lab.
+  mutate(Sample_ID_HT = str_extract(SampleIDName, "[:digit:]{2}-[:digit:]{5}")) %>% 
+  filter(Sample_ID_HT %in% SSO_samples) 
+)
+
+# A function to download and format ambiguity strings for each sample.
+SSO_ambiguity_string <- function(SampleID_Fusion){
+  Fusion_SAMPLE %>% 
+    filter(SampleID == SampleID_Fusion) %>% 
+    left_join(Fusion_Well, by = "SampleID") %>% 
+    # There were too many columns with the same name.
+    select(SampleID, SampleIDName, PatientID, UserID, WellID, TrayID, WellPosition, AnalysisUserID) %>% 
+    left_join(Fusion_Tray, by = "TrayID") %>% 
+    left_join(Fusion_Product, by = "CatalogID") %>% 
+    filter(LocusType %in% c("A", "B", "C", "DPA1,DPB1", "DQA1,DQB1", "DRB1", "DRB345")) %>% 
+    left_join(Fusion_WELL_RESULTT, by = "WellID") %>% 
+    # 01 contains the possible allele pairs in the highest resolution available.
+    filter(ResultType == "01") %>% 
+    # Value01 contains the ambiguity pairs and Value02 the locus.
+    select(SampleIDName, AddDT.x, CatalogID, VerNote, Value01, Value02) %>% 
+    rename(allele_pairs = Value01) %>% 
+    rename(locus = Value02) %>%
+    # Download to R.
+    as_tibble() %>% 
+    # Extract the IMGT version.
+    mutate(IMGT_version = str_extract(VerNote, "[:digit:]+\\.[:digit:]+\\.[:digit:]+")) %>% 
+    select(-VerNote) %>% 
+    mutate(Sample_ID_HT = str_extract(SampleIDName, "[:digit:]{2}-[:digit:]{5}")) %>% 
+    select(-SampleIDName) %>% 
+    # Put the allele_pairs into GL string format
+    mutate(allele_pairs = str_replace(str_trim(allele_pairs), " ", "+")) %>% 
+    summarise(ambiguity_string = str_c(allele_pairs, collapse = "|"), .by = c(Sample_ID_HT, locus, IMGT_version, CatalogID, AddDT.x)) %>% 
+    # If there are duplicate runs per locus, keep the latest one.
+    arrange(locus, desc(AddDT.x)) %>% 
+    slice_head(by = c(locus, AddDT.x)) %>% 
+    select(-AddDT.x)
+}
+
+
+```
+
+```{r}
+# Download data from Fusion server for SSO results.
+
+# Get the sample IDs of the SSO samples
+SSO_SampleIDs_vector <- SSO_SampleIDs %>% pull(1)
+ 
+# Pull out the results from Fusion
+# This uses the function above, which results in a tibble for each row. Passing this to `list_rbind` binds all the tibbles together by row.
+SSO_results_Fusion <- list_rbind(map(SSO_SampleIDs_vector, SSO_ambiguity_string, .progress = TRUE))
+
+# Save this file as it will take a while, and you might want to come back later. (This entire process took 44 minutes for Penn's data.)
+SSO_results_Fusion %>% saveRDS("SSO_results_Fusion.rds")
+```
+
+```{r}
+# Compile to the SSO results to a final file.
+# Note this will not automatically show results in a table below, because this table will be so large it will take nearly an hour to load it all into a viewable table. If you want to view the output of this, you can do so by various means, such as pasting the following line of code (with # removed) in the console:
+# print(SSO_results_final, n = 20)
+
+SSO_results_Fusion_final <- read_rds("SSO_results_Fusion.rds") %>% 
+  # Keep only 1 result per sample and locus.
+  arrange(desc(Sample_ID_HT), locus) %>% 
+  slice_head(by = c(Sample_ID_HT, locus)) %>% 
+  # Format the test info to a single line.
+  mutate(typing_info = str_c("locus: ", locus, ", IMGT: ", IMGT_version, ", Lot: ", CatalogID)) %>% 
+  select(-locus, -IMGT_version, -CatalogID) %>% 
+  # Add recipient/donor info back to this table.
+  left_join(cohort_tests_SSO %>% select(PatientId, SampleNbr), by = c("Sample_ID_HT" = "SampleNbr")) %>% 
+  # Summarize all the results to a single row per patient.
+  summarise(info = str_c(typing_info, collapse = "; "), HLA_GL_String = str_c(ambiguity_string, collapse = "^"), .by = PatientId)
+  
+```
+
+```{r}
+# Combine SSO results from HistoTrac and Fusion, join to study IDs, and save for transfer to Penn.
+
+Penn_SSO_table_2017_2023 <- cohort_tests_SSO %>% 
+  left_join(Study_IDs_HitoTrac_IDs_patients, by = join_by(PatientId == PatientId.recipient), relationship = "many-to-many") %>% 
+  left_join(Study_IDs_HitoTrac_IDs_donors, by = join_by(PatientId == PatientId.donor), relationship = "many-to-many") %>% 
+  left_join(SSO_results_Fusion_final, by = join_by(PatientId)) %>% 
+  select(study_ID, donor_ID, ReportableCommentsTxt, info, HLA_GL_String)
+  
+# Save the files
+Penn_SSO_table_2017_2023 %>% saveRDS("Files/Penn_SSO_table_2017_2023.rds")
+Penn_SSO_table_2017_2023 %>% write_csv("Files/Penn_SSO_table_2017_2023.csv.gz")
+```
+
+
+```{r}
+# Get samples for SAB
+(cohort_tests_SAB <- cohort_samples
+  %>% left_join(Test_SAB, by = c("SampleID" = "SampleId"))
+  #%>% count(TestTypeCd) # 155 different codes.
+  #%>% count(TestMethodCd) # 31 codes, for SAB it is "Class I SAB" or "Class II SAB".
+  %>% filter(TestMethodCd == "Class I SAB" | TestMethodCd == "Class II SAB")   
+  # This includes the samples, as well as the manual results in the "SpecificityTxt", "ModerateRiskAntibodyTxt", and "LowRiskAntibodyTxt" fields. This should work for pre-transplant samples (at least at Penn), but does not contain DSA information. That would come from the "UserTest" table, and I'm not sure from the name if that is a Penn-specific table.
+  %>% left_join(UserTest, by = "TestId")
+  #%>% filter(StatusCd == "POST") # It looks like this includes info on DSAs in these tests
+  %>% as_tibble # Download into R.
+  %>% mutate(across(where(is.character), ~na_if(., "")))
+  # Calculate the sample time post-transplant by joining to the master file. This value will be used, and the actual sample date will be stripped, for sending to Penn.
+  %>% left_join(Study_IDs_Tx_dates, by = join_by(PatientId == PatientId.recipient))
+  %>% select(histocompatibility_ID:study_ID, PatientId:DSABwMFI)
+  %>% mutate(days_post_Tx = difftime(SampleDt, Tx_date, units = "days"), .after = SampleDt)
+  #%>% arrange(histocompatibility_ID) # Days post transplant is calculating correctly.
+  )
+
+# Do some quick statistics on the SAB data:
+#cohort_tests_SAB %>% filter(StatusCd == "PRE") %>% count(TestMethodCd) # There are 8891 class I and 8464 class II pre-transplant SAB samples.
+#cohort_tests_SAB %>% filter(str_detect(StatusCd, "POST")) %>% count(TestMethodCd) # There are 8719 class I and 8715 class II post-transplant SAB samples.
+
+# This does not contain bead-level data, including MFI. That data can be in either, or both, of two places: in HistoTrac if bead-level data is imported to HistoTrac, or in Fusion. I will extract from both places to be sure.
+
+# Create vectors for SampleId and SampleNbr to use to find bead-level data in the HistoTrac and Fusion databases.
+SAB_TestIds <- cohort_tests_SAB %>% pull(TestId)
+SAB_SampleNbrs <- cohort_tests_SAB %>% pull(SampleNbr)
+```
+# Using a large vector of TestIDs to filter the SQL server did not work. Might have to do all the linking in SQL. 
+```{r}
+# Get SAB bead-level data from HistoTrac
+(SAB_data_HT <- cohort_samples
+  %>% left_join(Test_SAB, by = c("SampleID" = "SampleId"))
+  %>% left_join(TestDetail, by = "TestId")
+  %>% filter(!is.na(SingleAgNormalized)) # Not all samples have bead-level results in HistoTrac
+  %>% as_tibble
+  %>% left_join(Study_IDs_Tx_dates, by = join_by(PatientId == PatientId.recipient), relationship = "many-to-many")
+  %>% mutate(days_post_Tx = difftime(SampleDt, Tx_date, units = "days"), .after = SampleDt)
+  )
+```
+
+```{r}
+# Clean the HistoTrac SAB data and save for transfer to Penn
+(Penn_SAB_HT_table_2017_2023 <- SAB_data_HT
+  %>% select(histocompatibility_ID:study_ID, days_post_Tx, TestTypeCd:SingleAgSpecificity)
+  )
+
+# Save the files
+Penn_SAB_HT_table_2017_2023 %>% saveRDS("Files/Penn_SAB_HT_table_2017_2023.rds")
+Penn_SAB_HT_table_2017_2023 %>% write_csv("Files/Penn_SAB_HT_table_2017_2023.csv.gz")
+```
+
+```{r}
+# Get SAB bead-level data from Fusion
+
+# Connect to Fusion and compile SAB results.
+
+# Connect to the necessary tables
+(Fusion_SAMPLE <- tbl(Fusion, "SAMPLE"))
+(Fusion_Well <- tbl(Fusion, "Well"))
+(Fusion_Well_Detail <- tbl(Fusion, "Well_Detail"))
+(Fusion_Tray <- tbl(Fusion, "Tray"))
+(Fusion_Product <- tbl(Fusion, "Product"))
+(Fusion_Product_detail <- tbl(Fusion, "Product_detail"))
+```
+
+```{r}
+# Download the SAB results from Fusion.
+
+#The oldest samples did not have the exact HistoTrac accession number entered into Fusion - it had the patient's name appended. The code below extracts just the accession number so that all samples can be joined in the next set of code. There is no way to do this in the Fusion's SQL server, so the entire SAMPLE table will have to be downloaded into R.
+(SAB_data_Fusion <- Fusion_SAMPLE
+  %>% as_tibble()
+  %>% mutate(HT_accession = str_extract(SampleIDName, "^[:digit:]+-[:digit:]+"))
+  # Filter this table for the cohort sample IDs.
+  %>% filter(SampleIDName %in% SAB_SampleNbrs)
+)
+
+# Make a vector of the Fusion SampleIDs to use that to filter the other Fusion tables in SQL.
+SAB_data_Fusion_SampleIDs <- SAB_data_Fusion %>% pull(SampleID) 
+  
+# Perform the linking in Fusion's SQL environment and download to R.
+(SAB_data_Fusion_linked <- Fusion_Well
+  %>% filter(SampleID %in% SAB_data_Fusion_SampleIDs)
+  %>% left_join(Fusion_Well_Detail, by = "WellID")
+  %>% select(WellID, WellID, SampleID, BeadID, TrayID, RawData, NormalValue)
+  %>% left_join(Fusion_Tray, by = "TrayID")
+  %>% select(WellID:NormalValue, CatalogID)
+  %>% left_join(Fusion_Product, by = "CatalogID")
+  %>% select(WellID:CatalogID, Description)
+  %>% left_join(Fusion_Product_detail, by = c("CatalogID", "BeadID"))
+  %>% as_tibble()
+)
+```
+
+```{r}
+# Clean the Fusion SAB data and save for transfer to Penn
+
+# Create a table containing HistoTrac sample names and Fusion sample names to link to cohort data.
+(SAB_data_Fusion_sample <- SAB_data_Fusion
+  %>% select(SampleID, SampleIDName)
+ )
+
+# Extract the assay type from the Fusion tables to accurately link to the HT table, so only the class I results from HT are linked to the class I bead level data from Fusion, etc..
+
+(SAB_data_Fusion_linked_assay <- SAB_data_Fusion_linked 
+  %>% mutate(Assay = str_extract(Description, "Class I?(I|2)"), .after = WellID)
+  # Some non-SAB data was pulled, this will filter it out. 
+  %>% filter(!is.na(Assay))
+  # Sometimes the Fusion bead lot is entered as "Class 2" instead of "Class II."
+  %>% mutate(Assay = if_else(Assay == "Class 2", "Class II", Assay))
+  # To properly join to the HistoTrac table, this has to be in the form of "Class I SAB."
+  %>% mutate(Assay = str_c(Assay, " SAB"))
+ )
+
+(Penn_SAB_Fusion_table_2017_2023 <- SAB_data_Fusion_sample
+  %>% left_join(SAB_data_Fusion_linked_assay, by = join_by(SampleID))
+  %>% left_join(cohort_tests_SAB, by = join_by(SampleIDName == SampleNbr, Assay == TestMethodCd), suffix = c(".HT", ".fusion"), relationship = "many-to-many")
+  %>% select(histocompatibility_ID:study_ID, days_post_Tx, TestTypeCd:DSABwMFI, BeadID, RawData, NormalValue, Description, SpecAbbr, Specificity)
+  # Some non-SAB data got pulled in, this will clean up the table.
+  %>% filter(!is.na(histocompatibility_ID))
+)
+
+# Save the files
+Penn_SAB_Fusion_table_2017_2023 %>% saveRDS("Files/Penn_SAB_Fusion_table_2017_2023.rds")
+Penn_SAB_Fusion_table_2017_2023 %>% write_csv("Files/Penn_SAB_Fusion_table_2017_2023.csv.gz")
+```
+
+```{r}
+# Get XM data
+
+# Note: XM results will likely be very different for each center, as XM is the most variable test in an HLA lab, and this will likely extend to how the results are stored in the LIS.
+
+# Get samples for FCXM
+(cohort_tests_XM <- cohort_samples
+  %>% left_join(Test_typing, by = c("SampleID" = "SampleId"))
+  #%>% count(TestTypeCd) %>% arrange(desc(n))# 155 different codes.
+  #%>% count(TestMethodCd) # 31 codes, but does not contain XM codes. Use TestTypeCd instead.
+  %>% filter(TestTypeCd == "HLA PROFLOWXM" | TestTypeCd == "CURXM" | TestTypeCd == "HLADDFLOWXM" | TestTypeCd  == "FLOWXM" | TestTypeCd == "FLOWXMAB" | TestTypeCd == "DDFLOWXM" | TestTypeCd == "HLADXM")  
+  %>% as_tibble # Download into R.
+  )
+
+# Create a vector of the TestIds for filtering the HistoTrac Xmatch table.
+XM_TestIds <- cohort_tests_XM %>% pull(TestId)
+
+# Filter the HistoTrac Xmatch table and download XM results
+(cohort_XM_results <- Xmatch 
+  %>% filter(TestId %in% XM_TestIds)
+  %>% as_tibble()
+  %>% mutate(RatioTxt = na_if(RatioTxt, ""))
+  %>% filter(!is.na(RatioTxt))
+ )
+
+# Join XM samples to results, clean up the table for sending to Penn
+(Penn_XM_table_2017_2023 <- cohort_tests_XM
+  %>% left_join(cohort_XM_results, by = "TestId", suffix = c(".test", ".XM"))
+  # Only keep XMs that have a donor associated with them.
+  %>% filter(!is.na(DonorId))
+  # Only keep XMs that involve one of the donors in this study.
+  %>% inner_join(Study_IDs_HitoTrac_IDs_donors, by = join_by(DonorId == PatientId.donor))
+  # Only keep XMs that involve one of the recipients in this study
+  %>% inner_join(Study_IDs_HitoTrac_IDs_patients, by = join_by(PatientId.test == PatientId.recipient))
+  %>% select(study_ID, donor_ID, PatientId.test, DonorId, SampleNbr, SampleDt.test, StatusCd.test, CellCd, RatioTxt, ResultCd, NotesTxt, ReportableCommentsTxt.test)
+  # Need to join the the Tx date so time post transplant can be calculated, which will match up with the rest of the data to be sent to Penn.
+  %>% left_join(Study_IDs_Tx_dates, by = join_by(study_ID))
+  %>% mutate(days_post_Tx = difftime(SampleDt.test, Tx_date, units = "days"), .after = donor_ID)
+  # Maybe it's best not to keep notes, as we don't want to collect anything that could potential have PHI.
+  %>% select(study_ID: days_post_Tx, StatusCd.test:ResultCd)
+ )
+
+# Save the files
+Penn_XM_table_2017_2023 %>% saveRDS("Files/Penn_XM_table_2017_2023.rds")
+Penn_XM_table_2017_2023 %>% write_csv("Files/Penn_XM_table_2017_2023.csv.gz")
+```
+
+
