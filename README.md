@@ -1,4 +1,7 @@
 # Kidney-outcomes-R01---Kamoun-PI
+
+5-10-2024: "HLA lab data extraction template.V1.5.Rmd" uploaded. This R code contains changes to how SSO results are captured from the Fusion server.
+
 Instructions and code for extracting and formatting data to send to Penn. The R scripts are designed to be run in RStudio.
 
 This repository contains several files and folders:
