@@ -1,5 +1,7 @@
 # Kidney-outcomes-R01---Kamoun-PI
 
+8-1-2024: "HLA lab data extraction template.V2.0.Rmd" uploaded. This includes changes to allow for fuzzy matching between HistoTrac and the TIEDI data: 1. Matching recipients based on name and last 4 digits of SSN and 2. matching donors based on name.
+
 5-10-2024: "HLA lab data extraction template.V1.5.Rmd" uploaded. This R code contains changes to how SSO results are captured from the Fusion server.
 
 Instructions and code for extracting and formatting data to send to Penn. The R scripts are designed to be run in RStudio.
