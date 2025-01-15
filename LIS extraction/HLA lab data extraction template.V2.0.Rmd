@@ -2,7 +2,7 @@
 title: "HLA lab data extraction - 2017-2023"
 output: html_notebook
 params:
-  Center_ID: 99
+  Center_ID: 40
 ---
 
 ```{r}
@@ -18,7 +18,10 @@ library(readxl)
 library(xml2)
 library(fuzzyjoin)
 library(stringdist)
+```
 
+
+```{r}
 #Creating a connection to the HistoTrac server
 con <- dbConnect(odbc::odbc(), "HistoTrac", timeout = 10)
 
@@ -30,80 +33,76 @@ con <- dbConnect(odbc::odbc(), "HistoTrac", timeout = 10)
 
 # Sometimes patient and/or donor IDs will be mistakenly input into the wrong entries (e.g. sometimes a patient record will contain the donor ID, instead of the donor record contain the donor ID). To ensure accurate matching, create separate recipient and donor tables, based on the value found in HistoTrac.
 
-(Patients <- Patients_and_donors %>% filter(PatientTypeCd == "Patient"))
+(Patients <- Patients_and_donors %>% filter(PatientTypeCd == "Patient", firstnm != "", lastnm != "") %>% select(-UNOSId))
 (Donors <- Patients_and_donors %>% filter(PatientTypeCd == "Donor"))
 ```
-
 ```{r}
-# Fuzzy matching of recipients to the TIEDI files. This will match based on name and the last 4 digits of the recipient's SSN.
-
 # Import transplanted kidney patients from TIEDI record.
-(TIEDI_record_2017_2023 <- read_rds("PENN_TEIDI_combined_2017_2023.rds"))
+(TIEDI_record_2017_2024 <- read_rds("MDJH_TEIDI_combined_2017_2024.rds"))
+```
+```{r}
+# Now match recipients from the TIEDI record with the HistoTrac database. The relationship below is set to "many-to-one" because some recipients will have had multiple transplants. If this gives an error there is a problem.
+#(TIEDI_record_2017_2024_patients <- TIEDI_record_2017_2024 %>% left_join(Patients, by = c("SSN.recipient" = "SSNbr"), relationship = "many-to-one"))
+#(TIEDI_record_2017_2024_patients_fullSSN <- TIEDI_record_2017_2024_patients %>% filter(!is.na(PatientId)))
 
+# Filter for TIEDI records that won't match to HistoTrac records. 
+(TIEDI_record_2017_2024_unnmatched <- TIEDI_record_2017_2024 %>% anti_join(Patients, by = c("SSN.recipient" = "SSNbr")))
+
+# Filter for TIEDI records that will match
+(TIEDI_record_2017_2024_will_match <- TIEDI_record_2017_2024 %>% semi_join(Patients, by = c("SSN.recipient" = "SSNbr")))
+
+# Now match recipients from the TIEDI record with the HistoTrac database. The relationship below is set to "many-to-one" because some recipients will have had multiple transplants. If this gives an error there is a problem.
+(TIEDI_record_2017_2024_patients_full_SSN <- TIEDI_record_2017_2024_will_match %>% left_join(Patients, by = c("SSN.recipient" = "SSNbr"), relationship = "many-to-one"))
+
+# Fuzzy matching of recipients to the TIEDI files. This will match based on name and the last 4 digits of the recipient's SSN.
 # Make a column for full names and the last 4 digits of SSN.
-(TIEDI_record_2017_2023_full_name <- TIEDI_record_2017_2023 %>% mutate(full_name = str_c(first.recipient, " ", last.recipient), last_4 = str_extract(SSN.recipient, "[:digit:]{4}$"), .after = center))
+(TIEDI_record_2017_2024_full_name <- TIEDI_record_2017_2024_unnmatched %>% mutate(full_name = str_c(first.recipient, " ", last.recipient), last_4 = str_extract(SSN.recipient, "[:digit:]{4}$"), .after = center))
 
 # Do the same for the recipients from HistoTrac
 (Patients_full_name <- Patients %>% mutate(full_name = str_c(firstnm, " ", lastnm), last_4 = str_extract(SSNbr, "[:digit:]{4}$"), .after = HospitalID))
 
-# Do a test join on name alone
-(TIEDI_record_2017_2023_patients_fuzzy_join_test <- TIEDI_record_2017_2023_full_name 
-  %>% stringdist_join(Patients_full_name, by = "full_name", max_dist = 3, method = "osa", mode = "left", ignore_case = TRUE, distance_col = "distance") 
-  #%>% filter(last_4.x == last_4.y)
-  %>% select(full_name.x:first.recipient, full_name.y:last_4.y, SSNbr, firstnm, lastnm, distance)
-  )
-
-# Which patients won't match at all?
-TIEDI_record_2017_2023_patients_fuzzy_join_test %>% filter(is.na(full_name.y)) # Look for hyphenated names, nicknames, changed last names, etc. Decide if you want to update HistoTrac, or not include these transplants.
-
-
-# Do a test join on name and last 4 digits of SSN.
-(TIEDI_record_2017_2023_patients_fuzzy_join_lst4SSN_test <- TIEDI_record_2017_2023_full_name 
-  %>% stringdist_join(Patients_full_name, by = "full_name", max_dist = 3, method = "osa", mode = "left", ignore_case = TRUE, distance_col = "distance") 
-  %>% filter(last_4.x == last_4.y)
-  %>% select(full_name.x:first.recipient, full_name.y:last_4.y, SSNbr, firstnm, lastnm, distance)
-  ) 
-
-# First look at names that didn't match perfectly. 
-TIEDI_record_2017_2023_patients_fuzzy_join_lst4SSN_test %>% filter(distance > 0) # If everything looks good here, move on.
-
-# Next look at any recipient that matched more than once. 
-(TIEDI_record_2017_2023_patients_fuzzy_join_lst4SSN_test %>% group_by(SSN.recipient) %>% filter(n() >= 2) %>% arrange(full_name.x)) # If each of these are only due to a recipient having more than one transplant, then you're good. If there are other issues, determine how to resolve them.
-
-
 # Once all issues are resolved, perform a final match
-(TIEDI_record_2017_2023_patients <- TIEDI_record_2017_2023_full_name 
+(TIEDI_record_2017_2024_patients_fuzzy <- TIEDI_record_2017_2024_full_name 
   %>% stringdist_join(Patients_full_name, by = "full_name", max_dist = 3, method = "osa", mode = "left", ignore_case = TRUE, distance_col = "distance")
   %>% filter(last_4.x == last_4.y)
   %>% select(-full_name.x, -last_4.x, -full_name.y, -last_4.y, -distance)
   )
 
-# How many recipients don't have typing?
-TIEDI_record_2017_2023_patients %>% count(A1Cd) # If there are recipients with missing typing, work on resolving the issue.
+```
+```{r}
+# Combine the patients from the full SSN matching and the fuzzy matching
+(TIEDI_record_2017_2024_patients <- TIEDI_record_2017_2024_patients_full_SSN %>% bind_rows(TIEDI_record_2017_2024_patients_fuzzy) %>% arrange(Tx_date))
 
 # Create a study ID for each transplant, which will be a combination of the center ID for this study along with the histocompatibility ID from SRTR.
-(TIEDI_record_2017_2023_patients_IDs <- TIEDI_record_2017_2023_patients %>% mutate(study_ID = str_c(params$Center_ID, "-", histocompatibility_ID), .before = histocompatibility_ID))
+(TIEDI_record_2017_2024_patients_IDs <- TIEDI_record_2017_2024_patients %>% mutate(study_ID = str_c(params$Center_ID, "-", histocompatibility_ID), .before = histocompatibility_ID))
+
 ```
 
 ```{r}
 # Matching donors. Matching is done via UNOS ID, which should work for deceased donors. Living donors may not have UNOS ID recorded in HistoTrac. Fuzzy matching will be used to match these donors.
 
+# *** NOTE: JHU uses UNOS ID for decease donor last name, so the below logic is broken. Remove is.na(last_donor) or change to test last_donor == donor_ID. ***
 # First look for deceased donors that won't match joining by UNOS ID.
-TIEDI_record_2017_2023_patients_IDs %>% filter(is.na(last_donor)) %>% anti_join(Donors, by = c("donor_ID" = "UNOSId")) # Go through this list to see if UNOS IDs for deceased donors need to be updated in HistoTrac.
+#TIEDI_record_2017_2024_patients_IDs %>% filter(is.na(last_donor)) %>% anti_join(Donors, by = c("donor_ID" = "UNOSId")) # Go through this list to see if UNOS IDs for deceased donors need to be updated in HistoTrac.
+TIEDI_record_2017_2024_patients_IDs %>% filter(is.na(donor_ID)) %>% anti_join(Donors, by = c("donor_ID" = "UNOSId")) # 
 
 # Once UNOS IDs for all deceased donors are updated, look to see if any of the recipients will be matched to more than one entry. This should result in a table with zero entries if everything is OK. 
-TIEDI_record_2017_2023_patients_IDs %>% filter(is.na(last_donor)) %>% left_join(Donors, by = c("donor_ID" = "UNOSId"), suffix = c(".recipient", ".donor")) %>% filter(n() > 1, .by = "histocompatibility_ID") # If this table has entries, resolve the issues.
+#TIEDI_record_2017_2024_patients_IDs %>% filter(is.na(last_donor)) %>% left_join(Donors, by = c("donor_ID" = "UNOSId"), suffix = c(".recipient", ".donor")) %>% filter(n() > 1, .by = "histocompatibility_ID") # If this table has entries, resolve the issues.
+TIEDI_record_2017_2024_patients_IDs %>% filter(is.na(donor_ID)) %>% left_join(Donors, by = c("donor_ID" = "UNOSId"), suffix = c(".recipient", ".donor")) %>% filter(n() > 1, .by = "histocompatibility_ID")
 
 # Now perform a final join for the deceased donors, using "many-to-one" joining.
-(TIEDI_record_2017_2023_patients_donors_deceased <- TIEDI_record_2017_2023_patients_IDs %>% filter(is.na(last_donor)) %>% left_join(Donors, by = c("donor_ID" = "UNOSId"), suffix = c(".recipient", ".donor"), relationship = "many-to-one"))
+#(TIEDI_record_2017_2024_patients_donors_deceased <- TIEDI_record_2017_2024_patients_IDs %>% filter(is.na(last_donor)) %>% left_join(Donors, by = c("donor_ID" = "UNOSId"), suffix = c(".recipient", ".donor"), relationship = "many-to-many"))
+(TIEDI_record_2017_2024_patients_donors_unosid <- TIEDI_record_2017_2024_patients_IDs %>% filter(!is.na(donor_ID)) %>% left_join(Donors, by = c("donor_ID" = "UNOSId"), suffix = c(".recipient", ".donor"), relationship = "many-to-many"))
 ```
 
+# *** OMIT THIS CHUNK ***
 ```{r}
 # Now perform matching of living donors based on name of donor. We will first find all donors linked to the recipients in HistoTrac, then match to the TIEDI data.
 
 # Get all the recipients in the living donor transplants.
-living_donor_recipients <- TIEDI_record_2017_2023_patients_IDs %>% filter(!is.na(last_donor)) %>% pull(PatientId)
-  
+#living_donor_recipients <- TIEDI_record_2017_2024_patients_IDs %>% filter(!is.na(last_donor)) %>% pull(PatientId)
+no_unosid_donor_recipients <- TIEDI_record_2017_2024_patients_IDs %>% filter(is.na(donor_ID)) %>% pull(PatientId)
+
 #Connecting to the RelatedPatient table in HistoTrac, which will allow connections to the donors for each recipient.
 (RelatedPatient <- tbl(con, "RelatedPatient") 
   %>% select(CaseId, RelatedPatientID, RelationshipTypeCd))
@@ -111,7 +110,8 @@ living_donor_recipients <- TIEDI_record_2017_2023_patients_IDs %>% filter(!is.na
 #Connecting to the PatientCase table, and linking to the RelatedPatient table to get all donors linked to a patient.
 (HT_donors <- tbl(con, "PatientCase") 
   %>% select(PatientId, CaseId)
-  %>% filter(PatientId %in% living_donor_recipients)
+  #%>% filter(PatientId %in% living_donor_recipients)
+  %>% filter(PatientId %in% no_unosid_donor_recipients)
   %>% left_join(RelatedPatient, by = "CaseId")
   %>% as_tibble
   %>% select(PatientId, RelatedPatientID)
@@ -119,8 +119,10 @@ living_donor_recipients <- TIEDI_record_2017_2023_patients_IDs %>% filter(!is.na
 
 # Add the HT donors to the table.
 # Filter the TIEDI record for living donor transplants then link to donors in HistoTrac
-(TIEDI_record_2017_2023_patients_donors_living_test <- TIEDI_record_2017_2023_patients_IDs 
-  %>% filter(!is.na(last_donor)) # This filters for living donors
+#(TIEDI_record_2017_2024_patients_donors_living_test <- TIEDI_record_2017_2024_patients_IDs 
+(TIEDI_record_2017_2024_patients_donors_no_unosid_test <- TIEDI_record_2017_2024_patients_IDs 
+  #%>% filter(!is.na(last_donor)) # This filters for living donors
+  %>% filter(!is.na(donor_ID))
   # Make a column for full name of the donors.
   %>% mutate(full_name_TIEDI = str_c(first_donor, " ", last_donor), .after = Tx_date)
   # Link to HT donors
@@ -136,58 +138,71 @@ living_donor_recipients <- TIEDI_record_2017_2023_patients_IDs %>% filter(!is.na
   %>% distinct()
   )
 
-# Inspect the matched donors
-TIEDI_record_2017_2023_patients_donors_living_test %>% select(HospitalID.recipient, firstnm.recipient, lastnm.recipient, Tx_date, full_name_TIEDI, RelatedPatientID, full_name_HT, donor_name_match) %>% rename(HT_ID.donor = RelatedPatientID) %>% arrange(desc(donor_name_match)) # This is arranged with the worst name matches at the top. Look through to see if anything seems amiss.
-
-# Once everything looks good, clean up the living donor table and merge the deceased and living donor tables.
-(TIEDI_record_2017_2023_patients_donors_living <- TIEDI_record_2017_2023_patients_donors_living_test %>% select(-full_name_TIEDI, -full_name_HT, -donor_name_match) %>% rename(PatientId.recipient = PatientId, PatientId.donor = RelatedPatientID))
-
-# Final merger of all donors.
-(TIEDI_record_2017_2023_patients_donors <- TIEDI_record_2017_2023_patients_donors_deceased %>% bind_rows(TIEDI_record_2017_2023_patients_donors_living) %>% arrange(Tx_date) %>% select(-UNOSId.recipient, -UNOSId.donor))
 ```
 
+# *** OMIT THIS CHUNK ***
+```{r}
+# Inspect the matched donors
+#TIEDI_record_2017_2024_patients_donors_living_test %>% select(HospitalID.recipient, firstnm.recipient, lastnm.recipient, Tx_date, full_name_TIEDI, RelatedPatientID, full_name_HT, donor_name_match) %>% rename(HT_ID.donor = RelatedPatientID) %>% arrange(desc(donor_name_match)) # This is arranged with the worst name matches at the top. Look through to see if anything seems amiss.
+TIEDI_record_2017_2024_patients_donors_no_unosid_test %>% select(HospitalID.recipient, firstnm.recipient, lastnm.recipient, Tx_date, full_name_TIEDI, RelatedPatientID, full_name_HT, donor_name_match) %>% rename(HT_ID.donor = RelatedPatientID) %>% arrange(desc(donor_name_match))
+
+```
+
+```{r}
+# Once everything looks good, clean up the living donor table and merge the deceased and living donor tables.
+#(TIEDI_record_2017_2024_patients_donors_living <- TIEDI_record_2017_2024_patients_donors_living_test %>% select(-full_name_TIEDI, -full_name_HT, -donor_name_match) %>% rename(PatientId.recipient = PatientId, PatientId.donor = RelatedPatientID))
+#(TIEDI_record_2017_2024_patients_donors_no_unosid <- TIEDI_record_2017_2024_patients_donors_no_unosid_test %>% select(-full_name_TIEDI, -full_name_HT, -donor_name_match) %>% rename(PatientId.recipient = PatientId, PatientId.donor = RelatedPatientID))
+
+# Final merger of all donors.
+#(TIEDI_record_2017_2024_patients_donors <- TIEDI_record_2017_2024_patients_donors_deceased %>% bind_rows(TIEDI_record_2017_2024_patients_donors_living) %>% arrange(Tx_date) %>% select(-UNOSId.recipient, -UNOSId.donor))
+#(TIEDI_record_2017_2024_patients_donors <- TIEDI_record_2017_2024_patients_donors_unosid %>% bind_rows(TIEDI_record_2017_2024_patients_donors_no_unosid) %>% arrange(Tx_date) %>% select(-UNOSId.recipient, -UNOSId.donor))
+(TIEDI_record_2017_2024_patients_donors <- TIEDI_record_2017_2024_patients_donors_unosid %>% arrange(Tx_date))
+```
+# NOTE: Stopped here w/NB. Research why below donors not matching.
 ```{r}
 # Inspect the final table with recipient and donor typing. 
 
 # Determine how many donor entries are missing after the join.
-final_TIEDI_cases <-  TIEDI_record_2017_2023_patients_donors%>% pull(histocompatibility_ID)
-TIEDI_record_2017_2023 %>% filter(!histocompatibility_ID %in% final_TIEDI_cases) # Determine if you want to resolve any of these.
-
-# How many donors don't have typing?
-TIEDI_record_2017_2023_patients_donors %>% count(A1Cd.donor) # All donors should have typing.
-
-# While pulling data from HistoTrac, the PatientId will be used to link data. Once the tables are stripped of PHI and sent to Penn, there will need to be a way to link tables. I will create a study ID for each patient and donor and use that for linking at Penn.
-(Study_IDs <- TIEDI_record_2017_2023_patients_donors %>% select(histocompatibility_ID, PatientId.recipient, donor_ID, PatientId.donor) %>% mutate(study_ID = str_c(params$Center_ID, "-", histocompatibility_ID)))
+final_TIEDI_cases <-  TIEDI_record_2017_2024_patients_donors %>% pull(histocompatibility_ID)
+#tmp_missing_unresolved <- TIEDI_record_2017_2024_patients %>% filter(!histocompatibility_ID %in% final_TIEDI_cases) # Determine if you want to resolve any of these.
+#write.xlsx(tmp_missing_unresolved, "Missing_and_Unresolved_Records.xlsx")
 ```
 
+```{r}
+# How many donors don't have typing?
+TIEDI_record_2017_2024_patients_donors %>% count(A1Cd.donor) # All donors should have typing.
+
+# While pulling data from HistoTrac, the PatientId will be used to link data. Once the tables are stripped of PHI and sent to Penn, there will need to be a way to link tables. I will create a study ID for each patient and donor and use that for linking at Penn.
+(Study_IDs <- TIEDI_record_2017_2024_patients_donors %>% select(histocompatibility_ID, PatientId.recipient, donor_ID, PatientId.donor) %>% mutate(study_ID = str_c(params$Center_ID, "-", histocompatibility_ID)))
+```
 
 ```{r}
 # Clean the main recipient and donor typing table of PHI and save for transfer to Penn
 
-(Penn_main_table_2017_2023 <- TIEDI_record_2017_2023_patients_donors %>% select(study_ID, histocompatibility_ID, donor_ID, A1Cd.recipient:mDPB12EqCd.recipient, A1Cd.donor:mDPB12EqCd.donor))
+(MDJH_main_table_2017_2024 <- TIEDI_record_2017_2024_patients_donors %>% select(study_ID, histocompatibility_ID, donor_ID, A1Cd.recipient:mDPB12EqCd.recipient, A1Cd.donor:mDPB12EqCd.donor))
 
-Penn_main_table_2017_2023 %>% saveRDS("Files/Penn_main_table_2017_2023.rds")
-Penn_main_table_2017_2023 %>% write_csv("Files/Penn_main_table_2017_2023.csv.gz")
+MDJH_main_table_2017_2024 %>% saveRDS("Files/MDJH_main_table_2017_2024.rds")
+MDJH_main_table_2017_2024 %>% write_csv("Files/MDJH_main_table_2017_2024.csv.gz")
 ```
 
 ```{r}
 # Create a vector of PatientIDs (HistoTrac IDs) for all of the patients and donors included in cohort, for linking to typing and antibody data.
 
-PatientId_recipient <- TIEDI_record_2017_2023_patients_donors %>% pull(PatientId.recipient)
+PatientId_recipient <- TIEDI_record_2017_2024_patients_donors %>% pull(PatientId.recipient)
 
-PatientId_donor <- TIEDI_record_2017_2023_patients_donors %>% pull(PatientId.donor)
+PatientId_donor <- TIEDI_record_2017_2024_patients_donors %>% pull(PatientId.donor)
 
 # combine the IDs
 PatientId_total <- c(PatientId_recipient, PatientId_donor)
 
 # Create a table for linking HistoTrac IDs to study IDs. We'll need separate tables for recipient and donors, since each will have typing results, etc.
 
-(Study_IDs_HitoTrac_IDs_patients <- Study_IDs %>% select(study_ID, PatientId.recipient))
-(Study_IDs_HitoTrac_IDs_donors <- Study_IDs %>% select(donor_ID, PatientId.donor))
+(Study_IDs_HistoTrac_IDs_patients <- Study_IDs %>% select(study_ID, PatientId.recipient))
+(Study_IDs_HistoTrac_IDs_donors <- Study_IDs %>% select(donor_ID, PatientId.donor))
 
 # For the SAB  and XM data, I will want to calculate sample date as time post transplant, so we don't send actual sample dates to Penn. This will create a table to join to the SAB results to calculate time post transplant.
 
-(Study_IDs_Tx_dates <- TIEDI_record_2017_2023_patients_donors %>% select(histocompatibility_ID, PatientId.recipient, Tx_date) %>% mutate(study_ID = str_c(params$Center_ID, "-", histocompatibility_ID)))
+(Study_IDs_Tx_dates <- TIEDI_record_2017_2024_patients_donors %>% select(histocompatibility_ID, PatientId.recipient, Tx_date) %>% mutate(study_ID = str_c(params$Center_ID, "-", histocompatibility_ID)))
 ```
 
 ```{r}
@@ -209,13 +224,16 @@ PatientId_total <- c(PatientId_recipient, PatientId_donor)
 (Test_SAB <- tbl(con, "Test") 
   %>% select(TestId, SampleId, TestDt, TestTypeCd, TestMethodCd, DilutionTxt, PRAResultCd, SpecificityTxt, ModerateRiskAntibodyTxt, LowRiskAntibodyTxt)
   )
-
+```
+```{r}
+# *** OMITTED TESTING THIS CHUNK, TABLE EXISTS, SCHEMA DOES NOT  MATCH ***
 # Connecting to the UserTest table (I'm not sure if this is a table is specific to Penn's HistoTrac setup), which contains information on DSA calls in post-transplant SAB tests.
 
 (UserTest <- tbl(con, "UserTest") 
   %>% select(TestId, ClassIDSA:DSABwMFI)
   )
-
+```
+```{r}
 #Connecting to the TestDetail table in HisoTrac. This contains the SAB bead-level data.
 (TestDetail <- tbl(con, "TestDetail") 
   %>% select(TestId, TestDetailTypeCd, SingleAgBead, SingleAgRaw, SingleAgNormalized, SingleAgSpecAbbr, SingleAgSpecificity)
@@ -228,6 +246,7 @@ PatientId_total <- c(PatientId_recipient, PatientId_donor)
 
 ```
 
+# *** NOTE: STOPPED HERE. RT-PCR (SURETYPER) XML FILES NOT STORED IN STANDARD LOCATION PRIOR TO JANUARY 2021 (HT GO-LIVE) ***
 ```{r}
 # Get samples for RT-PCR
 (cohort_tests_RT_PCR <- cohort_samples
