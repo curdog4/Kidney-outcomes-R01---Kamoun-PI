@@ -42,8 +42,6 @@ con <- dbConnect(odbc::odbc(), "HistoTrac", timeout = 10)
 ```
 ```{r}
 # Now match recipients from the TIEDI record with the HistoTrac database. The relationship below is set to "many-to-one" because some recipients will have had multiple transplants. If this gives an error there is a problem.
-#(TIEDI_record_2017_2024_patients <- TIEDI_record_2017_2024 %>% left_join(Patients, by = c("SSN.recipient" = "SSNbr"), relationship = "many-to-one"))
-#(TIEDI_record_2017_2024_patients_fullSSN <- TIEDI_record_2017_2024_patients %>% filter(!is.na(PatientId)))
 
 # Filter for TIEDI records that won't match to HistoTrac records. 
 (TIEDI_record_2017_2024_unnmatched <- TIEDI_record_2017_2024 %>% anti_join(Patients, by = c("SSN.recipient" = "SSNbr")))
@@ -83,79 +81,19 @@ con <- dbConnect(odbc::odbc(), "HistoTrac", timeout = 10)
 
 # *** NOTE: JHU uses UNOS ID for decease donor last name, so the below logic is broken. Remove is.na(last_donor) or change to test last_donor == donor_ID. ***
 # First look for deceased donors that won't match joining by UNOS ID.
-#TIEDI_record_2017_2024_patients_IDs %>% filter(is.na(last_donor)) %>% anti_join(Donors, by = c("donor_ID" = "UNOSId")) # Go through this list to see if UNOS IDs for deceased donors need to be updated in HistoTrac.
 TIEDI_record_2017_2024_patients_IDs %>% filter(is.na(donor_ID)) %>% anti_join(Donors, by = c("donor_ID" = "UNOSId")) # 
 
 # Once UNOS IDs for all deceased donors are updated, look to see if any of the recipients will be matched to more than one entry. This should result in a table with zero entries if everything is OK. 
-#TIEDI_record_2017_2024_patients_IDs %>% filter(is.na(last_donor)) %>% left_join(Donors, by = c("donor_ID" = "UNOSId"), suffix = c(".recipient", ".donor")) %>% filter(n() > 1, .by = "histocompatibility_ID") # If this table has entries, resolve the issues.
 TIEDI_record_2017_2024_patients_IDs %>% filter(is.na(donor_ID)) %>% left_join(Donors, by = c("donor_ID" = "UNOSId"), suffix = c(".recipient", ".donor")) %>% filter(n() > 1, .by = "histocompatibility_ID")
 
 # Now perform a final join for the deceased donors, using "many-to-one" joining.
-#(TIEDI_record_2017_2024_patients_donors_deceased <- TIEDI_record_2017_2024_patients_IDs %>% filter(is.na(last_donor)) %>% left_join(Donors, by = c("donor_ID" = "UNOSId"), suffix = c(".recipient", ".donor"), relationship = "many-to-many"))
 (TIEDI_record_2017_2024_patients_donors_unosid <- TIEDI_record_2017_2024_patients_IDs %>% filter(!is.na(donor_ID)) %>% left_join(Donors, by = c("donor_ID" = "UNOSId"), suffix = c(".recipient", ".donor"), relationship = "many-to-many"))
-```
-
-# *** OMIT THIS CHUNK ***
-```{r}
-# Now perform matching of living donors based on name of donor. We will first find all donors linked to the recipients in HistoTrac, then match to the TIEDI data.
-
-# Get all the recipients in the living donor transplants.
-#living_donor_recipients <- TIEDI_record_2017_2024_patients_IDs %>% filter(!is.na(last_donor)) %>% pull(PatientId)
-no_unosid_donor_recipients <- TIEDI_record_2017_2024_patients_IDs %>% filter(is.na(donor_ID)) %>% pull(PatientId)
-
-#Connecting to the RelatedPatient table in HistoTrac, which will allow connections to the donors for each recipient.
-(RelatedPatient <- tbl(con, "RelatedPatient") 
-  %>% select(CaseId, RelatedPatientID, RelationshipTypeCd))
-
-#Connecting to the PatientCase table, and linking to the RelatedPatient table to get all donors linked to a patient.
-(HT_donors <- tbl(con, "PatientCase") 
-  %>% select(PatientId, CaseId)
-  #%>% filter(PatientId %in% living_donor_recipients)
-  %>% filter(PatientId %in% no_unosid_donor_recipients)
-  %>% left_join(RelatedPatient, by = "CaseId")
-  %>% as_tibble
-  %>% select(PatientId, RelatedPatientID)
-)
-
-# Add the HT donors to the table.
-# Filter the TIEDI record for living donor transplants then link to donors in HistoTrac
-#(TIEDI_record_2017_2024_patients_donors_living_test <- TIEDI_record_2017_2024_patients_IDs 
-(TIEDI_record_2017_2024_patients_donors_no_unosid_test <- TIEDI_record_2017_2024_patients_IDs 
-  #%>% filter(!is.na(last_donor)) # This filters for living donors
-  %>% filter(!is.na(donor_ID))
-  # Make a column for full name of the donors.
-  %>% mutate(full_name_TIEDI = str_c(first_donor, " ", last_donor), .after = Tx_date)
-  # Link to HT donors
-  %>% left_join(HT_donors, join_by(PatientId))
-  %>% left_join(Donors, join_by(RelatedPatientID == PatientId), suffix = c(".recipient", ".donor"))
-  # Make a column for full name of the donors.
-  %>% mutate(full_name_HT = str_c(firstnm.donor, " ", lastnm.donor), .after = SSNbr.donor)
-  # Calculate string distance between the TIEDI and HT names.
-  %>% mutate(donor_name_match = stringdist(str_to_lower(full_name_TIEDI), str_to_lower(full_name_HT), method = "osa"), .after = full_name_HT)
-  # Only keep the donors whose name matches.
-  %>% filter(!is.na(full_name_HT))
-  %>% filter(donor_name_match < 3)
-  %>% distinct()
-  )
-
-```
-
-# *** OMIT THIS CHUNK ***
-```{r}
-# Inspect the matched donors
-#TIEDI_record_2017_2024_patients_donors_living_test %>% select(HospitalID.recipient, firstnm.recipient, lastnm.recipient, Tx_date, full_name_TIEDI, RelatedPatientID, full_name_HT, donor_name_match) %>% rename(HT_ID.donor = RelatedPatientID) %>% arrange(desc(donor_name_match)) # This is arranged with the worst name matches at the top. Look through to see if anything seems amiss.
-TIEDI_record_2017_2024_patients_donors_no_unosid_test %>% select(HospitalID.recipient, firstnm.recipient, lastnm.recipient, Tx_date, full_name_TIEDI, RelatedPatientID, full_name_HT, donor_name_match) %>% rename(HT_ID.donor = RelatedPatientID) %>% arrange(desc(donor_name_match))
-
 ```
 
 ```{r}
 # Once everything looks good, clean up the living donor table and merge the deceased and living donor tables.
-#(TIEDI_record_2017_2024_patients_donors_living <- TIEDI_record_2017_2024_patients_donors_living_test %>% select(-full_name_TIEDI, -full_name_HT, -donor_name_match) %>% rename(PatientId.recipient = PatientId, PatientId.donor = RelatedPatientID))
-#(TIEDI_record_2017_2024_patients_donors_no_unosid <- TIEDI_record_2017_2024_patients_donors_no_unosid_test %>% select(-full_name_TIEDI, -full_name_HT, -donor_name_match) %>% rename(PatientId.recipient = PatientId, PatientId.donor = RelatedPatientID))
 
 # Final merger of all donors.
-#(TIEDI_record_2017_2024_patients_donors <- TIEDI_record_2017_2024_patients_donors_deceased %>% bind_rows(TIEDI_record_2017_2024_patients_donors_living) %>% arrange(Tx_date) %>% select(-UNOSId.recipient, -UNOSId.donor))
-#(TIEDI_record_2017_2024_patients_donors <- TIEDI_record_2017_2024_patients_donors_unosid %>% bind_rows(TIEDI_record_2017_2024_patients_donors_no_unosid) %>% arrange(Tx_date) %>% select(-UNOSId.recipient, -UNOSId.donor))
 (TIEDI_record_2017_2024_patients_donors <- TIEDI_record_2017_2024_patients_donors_unosid %>% arrange(Tx_date))
 ```
 # NOTE: Stopped here w/NB. Research why below donors not matching.
@@ -225,8 +163,8 @@ PatientId_total <- c(PatientId_recipient, PatientId_donor)
   %>% select(TestId, SampleId, TestDt, TestTypeCd, TestMethodCd, DilutionTxt, PRAResultCd, SpecificityTxt, ModerateRiskAntibodyTxt, LowRiskAntibodyTxt)
   )
 ```
-```{r}
 # *** OMITTED TESTING THIS CHUNK, TABLE EXISTS, SCHEMA DOES NOT  MATCH ***
+```{r}
 # Connecting to the UserTest table (I'm not sure if this is a table is specific to Penn's HistoTrac setup), which contains information on DSA calls in post-transplant SAB tests.
 
 (UserTest <- tbl(con, "UserTest") 
